@@ -318,12 +318,14 @@ class MatrixGame3Pipeline:
         if self.rank != 0:
             return
 
-        from wan.modules.attention import FLASH_ATTN_2_AVAILABLE, FLASH_ATTN_3_AVAILABLE
+        from wan.modules.attention import FLASH_ATTN_2_AVAILABLE, FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_4_AVAILABLE
 
         requested_fa = getattr(args, 'fa_version', None)
         actual_fa = "None (SDPA)"
         if requested_fa == '0':
             actual_fa = "Disabled (SDPA)"
+        elif FLASH_ATTN_4_AVAILABLE:
+            actual_fa = "Flash Attention 4"
         elif (requested_fa == '3' or requested_fa is None) and FLASH_ATTN_3_AVAILABLE:
             actual_fa = "Flash Attention 3"
         elif FLASH_ATTN_2_AVAILABLE:

@@ -1,11 +1,12 @@
 import torch
+import os
+
 try:
     import flash_attn_interface
-    import os
     # Centralized control for Flash Attention version
     # WAN_FA_VERSION: "2" or "3". Defaults to "3" if available.
     WAN_FA_VERSION = os.getenv("WAN_FA_VERSION", "3")
-    
+
     if WAN_FA_VERSION == "3":
         FLASH_ATTN_3_AVAILABLE = True
     else:
@@ -13,9 +14,18 @@ try:
 except ModuleNotFoundError:
     FLASH_ATTN_3_AVAILABLE = False
 
+# Flash Attention 4 (CuTe DSL implementation, exposed via flash_attn.cute).
+try:
+    from flash_attn.cute import flash_attn_varlen_func as flash_attn_varlen_func_v4
+    FLASH_ATTN_4_AVAILABLE = True
+except (ModuleNotFoundError, ImportError):
+    FLASH_ATTN_4_AVAILABLE = False
+
 try:
     import flash_attn
-    FLASH_ATTN_2_AVAILABLE = True
+    # The FA4 wheel ships a `flash_attn` namespace package that does NOT expose
+    # the classic FA2 varlen API, so only claim FA2 when the function exists.
+    FLASH_ATTN_2_AVAILABLE = hasattr(flash_attn, "flash_attn_varlen_func")
 except ModuleNotFoundError:
     FLASH_ATTN_2_AVAILABLE = False
 
@@ -89,20 +99,33 @@ def flash_attention(
     if q_scale is not None:
         q = q * q_scale
 
-    if version is not None and version == 3 and not FLASH_ATTN_3_AVAILABLE:
-        warnings.warn(
-            'Flash attention 3 is not available, use flash attention 2 instead.'
-        )
+    cu_seqlens_q = torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(
+        0, dtype=torch.int32).to(q.device, non_blocking=True)
+    cu_seqlens_k = torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(
+        0, dtype=torch.int32).to(q.device, non_blocking=True)
 
-    if (version is None or version == 3 or version == "3") and FLASH_ATTN_3_AVAILABLE:
+    if FLASH_ATTN_4_AVAILABLE:
+        # Flash Attention 4 (CuTe). Its varlen API mirrors FA3 but returns a
+        # (out, lse) tuple, so we keep only the attention output.
+        x = flash_attn_varlen_func_v4(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=lq,
+            max_seqlen_k=lk,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            deterministic=deterministic,
+        )[0].unflatten(0, (b, lq))
+    elif FLASH_ATTN_3_AVAILABLE:
         x = flash_attn_interface.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
-            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
             seqused_q=None,
             seqused_k=None,
             max_seqlen_q=lq,
@@ -111,15 +134,13 @@ def flash_attention(
             causal=causal,
             deterministic=deterministic).unflatten(0, (b, lq))
     else:
-        assert FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE
+        assert FLASH_ATTN_2_AVAILABLE
         x = flash_attn.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
-            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens]).cumsum(
-                0, dtype=torch.int32).to(q.device, non_blocking=True),
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=lq,
             max_seqlen_k=lk,
             dropout_p=dropout_p,
@@ -149,7 +170,7 @@ def attention(
     version=None,
 ):
     global _WARNED_FA_DISABLED
-    if version != '0' and (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE):
+    if version != '0' and (FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE or FLASH_ATTN_4_AVAILABLE):
         return flash_attention(
             q=q,
             k=k,
