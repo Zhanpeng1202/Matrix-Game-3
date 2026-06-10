@@ -1036,9 +1036,7 @@ class WanModel(ModelMixin, ConfigMixin):
         if self.use_memory:
             if return_memory:
                 return [u[:, :memory_length] for u in x], [u[:, memory_length:] for u in x]
-            if not torch.distributed.is_initialized() or torch.distributed.get_world_size() <= 1:
-                return torch.stack([u[:, memory_length:] for u in x])
-            return [u[:, memory_length:] for u in x]
+            return torch.stack([u[:, memory_length:] for u in x])
         return [u.float() for u in x]
 
     def unpatchify(self, x, grid_sizes):
